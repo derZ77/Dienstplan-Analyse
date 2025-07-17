@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Dienstplan-Analyse (Schritt für Schritt)</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 2rem; }
+    .block { margin-bottom: 2rem; }
+    .block h2 { margin-bottom: 0.5rem; }
+    .result { white-space: pre-wrap; background: #f9f9f9; padding: 1rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Dienstplan-Analyse (Schritt für Schritt)</h1>
+
+  <!-- Block 0 -->
+  <div class="block">
+    <h2>0. Datei auswählen</h2>
+    <input id="file-input" type="file" accept=".xlsx,.xls" />
+    <div id="file-result" class="result">Noch keine Datei ausgewählt.</div>
+  </div>
+
+  <!-- Block 1 -->
+  <div class="block">
+    <h2>1. Anzahl eindeutige Dienste</h2>
+    <div id="count-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 2 -->
+  <div class="block">
+    <h2>2. Anzahl geteilte Dienste</h2>
+    <div id="shared-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 3 -->
+  <div class="block">
+    <h2>3. Reserve Dienste</h2>
+    <p>IDs: 1, 100, 190, 90</p>
+    <div id="reserve-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 4 -->
+  <div class="block">
+    <h2>4. Dienste > 08:30h</h2>
+    <div id="long-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 5 -->
+  <div class="block">
+    <h2>5. Dienste mit unterschiedlichen Start- und End-Orten</h2>
+    <div id="loc-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 6 -->
+  <div class="block">
+    <h2>6. Dienste mit Dienstteilstück &gt;04:30h und Linie/Kurs</h2>
+    <div id="segment-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 7 -->
+  <div class="block">
+    <h2>7. Schichtzuweisung anhand des Dienstbeginns</h2>
+    <div id="shift-result" class="result">Warte...</div>
+  </div>
+
+  <!-- Block 8 -->
+  <div class="block">
+    <h2>8. Dienste nach Linie/Kurs</h2>
+    <div id="route-result" class="result">Warte...</div>
+  </div>
+
+<script>
+  document.getElementById('file-input').addEventListener('change', function() {
+    const file = this.files[0];
+    const blocks = ['count-result','shared-result','reserve-result','long-result','loc-result','segment-result','shift-result','route-result'];
+    document.getElementById('file-result').textContent = file ? `Datei: ${file.name}` : 'Keine Datei ausgewählt.';
+    blocks.forEach(id => document.getElementById(id).textContent = file ? 'Warte auf Auswertung...' : '-');
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+
+      // Block 1: eindeutige IDs
+      const ids = new Set();
+      for (let i = 1; i < rows.length; i++) {
+        const num = parseInt(rows[i][2], 10);
+        if (!isNaN(num) && num >= 1 && num <= 199) ids.add(num);
+      }
+      document.getElementById('count-result').textContent = `Anzahl eindeutiger Dienst-IDs: ${ids.size}`;
+
+      // Block 2: geteilte Dienste
+      const shared = [...ids].filter(id => (id >= 40 && id <= 59) || (id >= 140 && id <= 159));
+      document.getElementById('shared-result').textContent =
+        `Anzahl geteilte Dienste: ${shared.length}\nIDs: ${shared.join(', ')}`;
+
+      // Block 3: Reserve Dienste
+      const reserveIds = [1,100,190,90];
+      const foundReserve = reserveIds.filter(id => ids.has(id));
+      document.getElementById('reserve-result').textContent =
+        `Anzahl Reserve-Dienste: ${foundReserve.length}\nIDs: ${foundReserve.join(', ')}`;
+
+      // Block 4: Dienste >08:30h ohne Reserve
+      const longSet = new Set();
+      let lastId4 = null;
+      for (let i = 1; i < rows.length; i++) {
+        if (/^\d+$/.test(rows[i][2])) lastId4 = parseInt(rows[i][2], 10);
+        const id4 = lastId4;
+        if (id4 == null || foundReserve.includes(id4)) continue;
+        const raw = rows[i][16];
+        if (typeof raw === 'string' && /^\d{1,2}:\d{2}$/.test(raw.trim())) {
+          const [h,m] = raw.trim().split(':').map(Number);
+          if (h > 8 || (h === 8 && m > 30)) longSet.add(id4);
+        }
+      }
+      document.getElementById('long-result').textContent =
+        `Dienste >08:30h: ${[...longSet].sort((a,b)=>a-b).join(', ')}`;
+
+      // Block 5: unterschiedliche Start-/Endorte
+      const eq = new Set(['BBU','BUP','BBN','NSL']);
+      const locSet = new Set();
+      let currentId5 = null;
+      let startLoc5 = null;
+      for (let i = 1; i <= rows.length; i++) {
+        const row = rows[i] || [];
+        const isGap = row.every(c => c == null || c === '');
+        const idCell = rows[i] ? rows[i][2] : null;
+        if (/^\d+$/.test(idCell)) {
+          if (currentId5 != null && startLoc5) {
+            const prev = rows[i-1] || [];
+            const endLoc = prev[10] || '';
+            if (endLoc && startLoc5 !== endLoc && !(eq.has(startLoc5) && eq.has(endLoc))) locSet.add(currentId5);
+          }
+          currentId5 = parseInt(idCell, 10);
+          startLoc5 = row[6] || '';
+        } else if (isGap) {
+          if (currentId5 != null && startLoc5) {
+            const prev = rows[i-1] || [];
+            const endLoc = prev[10] || '';
+            if (endLoc && startLoc5 !== endLoc && !(eq.has(startLoc5) && eq.has(endLoc))) locSet.add(currentId5);
+          }
+          currentId5 = null;
+          startLoc5 = null;
+        }
+      }
+      document.getElementById('loc-result').textContent =
+        `Unterschiedliche Orte: ${[...locSet].sort((a,b)=>a-b).join(', ')}`;
+
+      // Block 6: Dienstteilstücke >04:30h & Linie/Kurs
+      const segMap = new Map();
+      let lastId6 = null;
+      for (let i = 1; i < rows.length; i++) {
+        if (/^\d+$/.test(rows[i][2])) lastId6 = parseInt(rows[i][2], 10);
+        const start = rows[i][5];
+        const end = rows[i][9];
+        const code = rows[i][4] || '';
+        if (typeof start === 'string' && typeof end === 'string') {
+          const m1 = start.trim().match(/^(\d{1,2}):(\d{2})$/);
+          const m2 = end.trim().match(/^(\d{1,2}):(\d{2})$/);
+          if (m1 && m2) {
+            const t1 = parseInt(m1[1], 10) * 60 + parseInt(m1[2], 10);
+            const t2 = parseInt(m2[1], 10) * 60 + parseInt(m2[2], 10);
+            if (t2 - t1 > 270) {
+              if (!segMap.has(lastId6)) segMap.set(lastId6, new Set());
+              if (code.trim()) segMap.get(lastId6).add(code.trim());
+            }
+          }
+        }
+      }
+      let segText = `Dienstteilstücke >04:30h: ${segMap.size}\n`;
+      [...segMap.entries()].sort((a,b)=>a[0]-b[0]).forEach(([id,codes]) => {
+        segText += `ID ${id}: ${[...codes].join(', ')}\n`;
+      });
+      document.getElementById('segment-result').textContent = segText;
+
+      // Block 7: Schichtzuweisung anhand des Dienstbeginns
+      const shiftRules = [
+        { name: 'F1', start: 2*60+50, end: 4*60+30 },
+        { name: 'F2', start: 4*60+31, end: 6*60+11 },
+        { name: 'F3', start: 6*60+12, end: 10*60+14 },
+        { name: 'S1', start: 10*60+15, end: 12*60+59 },
+        { name: 'S2', start: 13*60, end: 19*60+19 },
+        { name: 'N',  start: 19*60+20, end: 24*60 }
+      ];
+      const shiftCount = {};
+      const assignments = [];
+      let lastId7 = null;
+      for (let i = 1; i < rows.length; i++) {
+        if (/^\d+$/.test(rows[i][2])) lastId7 = parseInt(rows[i][2], 10);
+        const id7 = lastId7;
+        const rawTime = rows[i][5];
+        if (id7 != null && typeof rawTime === 'string' && /^\d{1,2}:\d{2}$/.test(rawTime.trim())) {
+          if (!assignments.some(a => a.id === id7)) {
+            const [h, m] = rawTime.trim().split(':').map(Number);
+            const minutes = h*60 + m;
+            const rule = shiftRules.find(r => r.end > r.start ? minutes >= r.start && minutes < r.end : minutes >= r.start || minutes < r.end);
+            const name = rule ? rule.name : 'Unbekannte Schicht';
+            assignments.push({ id: id7, shift: name });
+            shiftCount[name] = (shiftCount[name] || 0) + 1;
+          }
+        }
+      }
+      let shText = 'Schichtzählung:\n';
+      Object.entries(shiftCount).forEach(([name,count]) => { shText += `${name}: ${count}\n`; });
+      shText += '\nZuteilung:\n';
+      assignments.sort((a,b)=>a.id-b.id).forEach(a => { shText += `ID ${a.id}: ${a.shift}\n`; });
+      document.getElementById('shift-result').textContent = shText;
+
+      // Block 8: Dienste nach Linie/Kurs mit Sortierung nach Startzeit
+      const routeMap = new Map();
+      let lastId8 = null;
+      rows.slice(1).forEach(r => {
+        if (/^[0-9]+$/.test(r[2])) lastId8 = parseInt(r[2], 10);
+        const key = r[4];
+        if (typeof key === 'string' && /^\d{1,2}\/\d{1,2}$/.test(key.trim())) {
+          const start = r[5] || '';
+          const end = r[9] || '';
+          const sLoc = r[6] || '';
+          const eLoc = r[10] || '';
+          if (!routeMap.has(key)) routeMap.set(key, []);
+          routeMap.get(key).push({ id: lastId8, start, end, sLoc, eLoc });
+        }
+      });
+      const sortedKeys = [...routeMap.keys()].sort((a,b)=>{ const [l1,c1]=a.split('/').map(Number); const [l2,c2]=b.split('/').map(Number); return l1-l2||c1-c2; });
+      let routeTxt = 'Dienste nach Linie/Kurs:\n';
+      sortedKeys.forEach(key => {
+        routeTxt += `${key}:\n`;
+        routeMap.get(key).slice().filter(item=>/^\d{1,2}:\d{2}$/.test(item.start)).sort((a,b)=>{const [h1,m1]=a.start.split(':').map(Number); const [h2,m2]=b.start.split(':').map(Number); return h1*60+m1 - (h2*60+m2); }).forEach(item => {
+          routeTxt += `  ID ${item.id} | ${item.start} (${item.sLoc}) → ${item.end} (${item.eLoc})\n`;
+        });
+        routeTxt += '\n';
+      });
+      document.getElementById('route-result').textContent = routeTxt.trim();
+    };
+    // Fix: use reader instead of rd
+    reader.readAsArrayBuffer(file);
+  });
+</script>
+</body>
+</html>
